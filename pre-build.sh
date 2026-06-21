@@ -1,87 +1,102 @@
 #!/bin/bash
 #
-# pre-build.sh для DIR-620 D1 (RT3352)
-# Чипы: Flash MX25L12872F (16 МБ) + RAM AS4C32M16SB-6TIN (64 МБ)
+# =============================================================================
+# pre-build.sh для D-Link DIR-620 D1 (RT3352)
+# =============================================================================
+# Цель: Поддержка
+#   - Flash: MX25L12872F (16 МБ)
+#   - RAM:  AS4C32M16SB-6TIN (64 МБ)
 #
-# Использование: поместить в корень репозитория padavan-ng / padavan-builder
-# и запустить сборку (GitHub Actions или локально)
+# Использование:
+#   Положить этот файл в корень репозитория hadzhioglu/padavan-ng
+#   и запустить сборку (GitHub Actions или локально).
 #
+# После первой успешной загрузки обязательно выполнить:
+#   nvram set sdram_init=0x0013
+#   nvram commit
+#   reboot
+# =============================================================================
 
-echo "=== Применяем патчи для MX25L12872F (16MB Flash) и AS4C32M16SB-6TIN (64MB RAM) ==="
+set -euo pipefail
 
-# ============================================================
-# 1. Патч размера оперативной памяти на 64 МБ (Board.dat + kernel config)
-# ============================================================
-echo "[1/5] Патчим RAM 64MB ..."
+echo "================================================================"
+echo "  pre-build.sh: DIR-620 D1 + MX25L12872F (16MB) + AS4C32M16SB-6TIN (64MB)"
+echo "================================================================"
+
+# ------------------------------------------------------------------
+# 1. RAM 64 МБ
+# ------------------------------------------------------------------
+echo "[1/4] Патчим поддержку 64 МБ RAM ..."
 
 # Board.dat
 find ./trunk -name "Board.dat" -exec sed -i 's/mem=32M/mem=64M/g' {} \;
 
-# kernel-3.4.x.config (hadzhioglu/padavan-ng и похожие форки)
+# kernel-3.4.x.config (hadzhioglu/padavan-ng)
 KCFG="./trunk/configs/boards/DLINK/DIR-620D1/kernel-3.4.x.config"
 if [ -f "$KCFG" ]; then
     sed -i 's/CONFIG_RT2880_DRAM_32M=y/CONFIG_RT2880_DRAM_64M=y/' "$KCFG"
     sed -i 's/CONFIG_RALINK_RAM_SIZE=32/CONFIG_RALINK_RAM_SIZE=64/' "$KCFG"
+    echo "    -> kernel-3.4.x.config обновлён"
 fi
 
-# Device Tree
+# Device Tree (на всякий случай)
 find ./trunk -name "*.dts" -exec sed -i 's/32M/64M/g' {} \; 2>/dev/null || true
 
-# ============================================================
-# 2. Патч Flash 16 МБ (MX25L12872F)
-# ============================================================
-echo "[2/5] Патчим Flash 16MB + mtdparts ..."
+# ------------------------------------------------------------------
+# 2. Flash 16 МБ + mtdparts
+# ------------------------------------------------------------------
+echo "[2/4] Патчим поддержку 16 МБ Flash + mtdparts ..."
 
-# kernel config: убираем жёсткое ограничение 8MB (если есть)
+# Убираем искусственное ограничение 8 МБ в kernel config
 if [ -f "$KCFG" ]; then
     sed -i '/CONFIG_RT2880_FLASH_8M/d' "$KCFG"
-    # Если в твоей версии конфига есть CONFIG_RT2880_FLASH_16M — раскомментируй строку ниже
-    # sed -i 's/# CONFIG_RT2880_FLASH_16M is not set/CONFIG_RT2880_FLASH_16M=y/' "$KCFG"
 fi
 
-# mtdparts в Board.dat (рекомендуемая строка для 16MB)
+# Правильная строка mtdparts для 16 МБ
 MTDPARTS="mtdparts=spi0.0:256k(bootloader)ro,64k(env),64k(factory),-(firmware)"
 find ./trunk -name "Board.dat" -exec sed -i "s|mtdparts=spi0.0:.*$|${MTDPARTS}|g" {} \;
 
-# ============================================================
-# 3. Дополнительные патчи (опционально)
-# ============================================================
-echo "[3/5] Дополнительные патчи ..."
+# ------------------------------------------------------------------
+# 3. Снятие лимита размера прошивки (самое важное!)
+# ------------------------------------------------------------------
+echo "[3/4] Снимаем ограничение max_fw_size (~7.8 МБ → ~15 МБ) ..."
 
-# Если после прошивки память нестабильна — раскомментируй и попробуй разные значения
-# find ./trunk -name "Board.dat" -exec sed -i 's/sdram_init=0x[0-9a-fA-F]*/sdram_init=0x0013/g' {} \;
+# В hadzhioglu/padavan-ng DIR-620D1 использует pt_ralink_8m_bigstor.config
+# Нужно поднять лимит, иначе CI падает с ошибкой "Firmware size exceeds max size"
 
-# ============================================================
-# 4. Финальные действия
-# ============================================================
-echo "[4/5] Готово!"
+find ./trunk -name "partitions.config" -o -name "*8m*.config" 2>/dev/null | while read -r cfg; do
+    [ -f "$cfg" ] || continue
 
+    # Основные варианты имён переменных в padavan
+    sed -i 's/max_size=[0-9]*/max_size=15728640/g' "$cfg" 2>/dev/null || true
+    sed -i 's/firmware_size=[0-9]*/firmware_size=15204352/g' "$cfg" 2>/dev/null || true
+    sed -i 's/7798784/15728640/g' "$cfg" 2>/dev/null || true
+    sed -i 's/0x770000/0xF00000/g' "$cfg" 2>/dev/null || true
+
+    echo "    -> Обновлён: $cfg"
+done
+
+# ------------------------------------------------------------------
+# 4. Финальные сообщения
+# ------------------------------------------------------------------
+echo "[4/4] Готово!"
 echo ""
-echo "Патчи применены успешно для:"
-echo "  • RAM: 64 МБ (AS4C32M16SB-6TIN + CONFIG_RALINK_RAM_SIZE=64)"
-echo "  • Flash: 16 МБ (MX25L12872F)"
+echo "Патчи успешно применены:"
+echo "  • RAM 64 МБ (AS4C32M16SB-6TIN)"
+echo "  • Flash 16 МБ (MX25L12872F)"
+echo "  • Лимит размера прошивки снят"
 echo ""
-echo "Рекомендуемые настройки в build.config:"
+echo "Рекомендуемые опции в build.config:"
 echo "  CONFIG_FIRMWARE_PRODUCT_ID=\"DIR-620D1\""
+echo "  CONFIG_FIRMWARE_WIFI2_DRIVER=2.7"
 echo ""
-echo "После первой загрузки выполни:"
+echo "После первой загрузки новой прошивки ОБЯЗАТЕЛЬНО выполни:"
+echo ""
 echo "  nvram set sdram_init=0x0013"
 echo "  nvram commit"
 echo "  reboot"
 echo ""
-echo "Если будут проблемы со стабильностью памяти — попробуй другие значения sdram_init."
-
+echo "Если память или Wi-Fi будут нестабильны — попробуй другие значения:"
+echo "  0x001B, 0x000B, 0x0413, 0x0017"
 echo ""
-echo "Патчи применены успешно."
-echo "Теперь можно собирать прошивку."
-echo "Рекомендуемые настройки в build.config:"
-echo "  - CONFIG_FIRMWARE_PRODUCT_ID=\"DIR-620D1\""
-echo "  - mem=64M (уже пропатчено)"
-echo "  - 16 МБ flash (mtdparts обновлены)"
-echo ""
-echo "После первой загрузки новой прошивки выполни:"
-echo "  nvram set sdram_init=0x0013"
-echo "  nvram commit"
-echo "  reboot"
-echo ""
-echo "Если Wi-Fi или память будут нестабильны — попробуй другие значения sdram_init."
+echo "================================================================"
